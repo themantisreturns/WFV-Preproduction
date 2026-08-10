@@ -187,6 +187,165 @@ function activityMarkup(title){
     </article>`).join(''):`<div class="activity-empty">No notes yet. Add the first rehearsal thought, question, or decision for this song.</div>`}</div>
   </div>`;
 }
+// Band-uploaded audio ideas / version history (stored privately in Supabase Storage)
+function audioIdeasFolder(title){
+  const slug=String(title||'song').normalize('NFKD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'')||'song';
+  return `ideas/${slug}`;
+}
+function sanitizeUploadName(name){
+  const clean=String(name||'audio').normalize('NFKD').replace(/[\u0300-\u036f]/g,'').replace(/[^A-Za-z0-9._-]+/g,'-').replace(/-+/g,'-').replace(/^-+|-+$/g,'');
+  return clean||'audio';
+}
+function formatBytes(bytes){
+  const n=Number(bytes||0); if(!n) return '';
+  const units=['B','KB','MB','GB']; let v=n,i=0; while(v>=1024&&i<units.length-1){v/=1024;i++;}
+  return `${v>=10||i===0?Math.round(v):v.toFixed(1)} ${units[i]}`;
+}
+function formatVersionDate(value){
+  try{return new Intl.DateTimeFormat(undefined,{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'}).format(new Date(value));}
+  catch(e){return ''}
+}
+function audioIdeasMarkup(title){
+  if(!remoteReady) return `<div class="audio-ideas-panel"><div class="activity-empty">Band audio uploads are available once the shared Supabase workspace is connected.</div></div>`;
+  return `<div class="audio-ideas-panel">
+    <div class="audio-upload-box">
+      <div class="audio-upload-head"><div><strong>Share an audio idea</strong><span>Upload a guitar part, harmony idea, alternate arrangement, rough mix, or full-song version.</span></div></div>
+      <label class="audio-file-picker">Audio file<input id="audio-idea-file" type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.aif,.aiff,.flac,.ogg"></label>
+      <label class="audio-label-field">Version / idea label <input id="audio-idea-label" type="text" maxlength="120" placeholder="e.g. Bart - chorus lead idea, Full arrangement v2"></label>
+      <div class="audio-upload-actions"><span id="audioUploadStatus" class="asset-status"></span><button class="pill primary" data-action="upload-audio-idea" data-title="${escapeAttr(title)}">Upload Audio</button></div>
+    </div>
+    <div class="audio-history-head"><div><strong>Version History</strong><span id="audioVersionCount"></span></div><button class="ghost small" data-action="refresh-audio-ideas" data-title="${escapeAttr(title)}">Refresh</button></div>
+    <div id="audioIdeasList" class="audio-history-list"><div class="activity-empty">Loading audio versions…</div></div>
+  </div>`;
+}
+function audioUserMetadata(item){
+  const direct=item?.user_metadata;
+  if(direct && typeof direct==='object') return direct;
+  const md=item?.metadata||{};
+  if(md.user_metadata && typeof md.user_metadata==='object') return md.user_metadata;
+  if(md.metadata && typeof md.metadata==='object') return md.metadata;
+  return md;
+}
+async function uploadAudioIdeaFile(bucket,path,file,metadata,onProgress){
+  // Supabase recommends resumable TUS uploads for larger files. Small files use the simpler SDK upload.
+  if(file.size<=6*1024*1024 || !window.tus?.Upload){
+    const result=await supabaseClient.storage.from(bucket).upload(path,file,{contentType:file.type||undefined,upsert:false,metadata});
+    if(result.error) throw result.error;
+    if(onProgress) onProgress(100);
+    return;
+  }
+  const {data:{session}}=await supabaseClient.auth.getSession();
+  if(!session?.access_token) throw new Error('Your login session expired. Reload and sign in again.');
+  const projectId=new URL(window.WFV_CONFIG.SUPABASE_URL).hostname.split('.')[0];
+  await new Promise((resolve,reject)=>{
+    const upload=new window.tus.Upload(file,{
+      endpoint:`https://${projectId}.storage.supabase.co/storage/v1/upload/resumable`,
+      retryDelays:[0,3000,5000,10000,20000],
+      headers:{authorization:`Bearer ${session.access_token}`,'x-upsert':'false'},
+      uploadDataDuringCreation:true,
+      removeFingerprintOnSuccess:true,
+      metadata:{
+        bucketName:bucket,
+        objectName:path,
+        contentType:file.type||'audio/mpeg',
+        cacheControl:'3600',
+        metadata:JSON.stringify(metadata)
+      },
+      chunkSize:6*1024*1024,
+      onError:error=>reject(error),
+      onProgress:(uploaded,total)=>{if(onProgress&&total)onProgress(Math.round((uploaded/total)*100));},
+      onSuccess:()=>resolve()
+    });
+    upload.findPreviousUploads().then(previous=>{
+      if(previous.length) upload.resumeFromPreviousUpload(previous[0]);
+      upload.start();
+    }).catch(reject);
+  });
+}
+async function uploadAudioIdea(title){
+  if(!remoteReady||!supabaseClient) return;
+  const input=document.getElementById('audio-idea-file');
+  const labelInput=document.getElementById('audio-idea-label');
+  const status=document.getElementById('audioUploadStatus');
+  const file=input?.files?.[0];
+  if(!file){if(status) status.textContent='Choose an audio file first.'; return;}
+  if(file.type && !file.type.startsWith('audio/')){if(status) status.textContent='Please choose an audio file.'; return;}
+  const btn=document.querySelector(`[data-action="upload-audio-idea"][data-title="${CSS.escape(title)}"]`);
+  if(btn) btn.disabled=true;
+  if(status) status.textContent=`Uploading ${file.name}…`;
+  const bucket=window.WFV_CONFIG?.STORAGE_BUCKET||'wfv-private';
+  const unique=`${Date.now()}-${Math.random().toString(36).slice(2,8)}__${sanitizeUploadName(file.name)}`;
+  const path=`${audioIdeasFolder(title)}/${unique}`;
+  const label=String(labelInput?.value||'').trim();
+  const metadata={
+    wfvLabel:label,
+    uploadedBy:currentMember?.display_name||currentSession?.user?.email||'Band',
+    uploadedByEmail:currentSession?.user?.email||'',
+    originalName:file.name,
+    song:title
+  };
+  try{
+    await uploadAudioIdeaFile(bucket,path,file,metadata,pct=>{if(status)status.textContent=`Uploading ${file.name}… ${pct}%`;});
+  }catch(error){
+    if(btn) btn.disabled=false;
+    console.error('WFV audio idea upload failed',error); if(status) status.textContent=`Upload failed: ${error.message||'Unknown error'}`; return;
+  }
+  if(btn) btn.disabled=false;
+  if(input) input.value=''; if(labelInput) labelInput.value='';
+  if(status) status.textContent='Uploaded ✓';
+  await loadAudioIdeas(title);
+  setTimeout(()=>{if(status?.textContent==='Uploaded ✓')status.textContent='';},2200);
+}
+function canDeleteAudioIdea(item){
+  if(currentMember?.role==='admin') return true;
+  const email=String(audioUserMetadata(item)?.uploadedByEmail||'').toLowerCase();
+  return Boolean(email && email===String(currentSession?.user?.email||'').toLowerCase());
+}
+async function deleteAudioIdea(title,path){
+  if(!remoteReady||!supabaseClient||!path) return;
+  if(!window.confirm('Delete this uploaded audio version? This cannot be undone.')) return;
+  const bucket=window.WFV_CONFIG?.STORAGE_BUCKET||'wfv-private';
+  const {error}=await supabaseClient.storage.from(bucket).remove([path]);
+  if(error){window.alert(`Could not delete the audio file: ${error.message||'Unknown error'}`); return;}
+  await loadAudioIdeas(title);
+}
+async function loadAudioIdeas(title){
+  const listEl=document.getElementById('audioIdeasList');
+  if(!listEl||!supabaseClient||!remoteReady) return;
+  const countEl=document.getElementById('audioVersionCount');
+  listEl.innerHTML='<div class="activity-empty">Loading audio versions…</div>';
+  const bucket=window.WFV_CONFIG?.STORAGE_BUCKET||'wfv-private';
+  const folder=audioIdeasFolder(title);
+  const {data,error}=await supabaseClient.storage.from(bucket).list(folder,{limit:100,offset:0,sortBy:{column:'created_at',order:'desc'}});
+  if(error){console.error('WFV audio idea list failed',error); listEl.innerHTML=`<div class="activity-empty">Could not load audio versions: ${escapeHtml(error.message||'Unknown error')}</div>`; return;}
+  const files=(data||[]).filter(item=>item?.id);
+  if(countEl) countEl.textContent=files.length?`${files.length} uploaded version${files.length===1?'':'s'}`:'No uploads yet';
+  if(!files.length){listEl.innerHTML='<div class="activity-empty">No band audio ideas yet. Upload the first alternate part or version above.</div>'; return;}
+  const signed=await Promise.all(files.map(async item=>{
+    const path=`${folder}/${item.name}`;
+    const {data:signedData,error:signedError}=await supabaseClient.storage.from(bucket).createSignedUrl(path,60*60*2);
+    return {item,path,url:signedData?.signedUrl||'',error:signedError};
+  }));
+  const chronological=[...files].sort((a,b)=>new Date(a.created_at||0)-new Date(b.created_at||0));
+  const versionByName=new Map(chronological.map((f,i)=>[f.name,i+1]));
+  listEl.innerHTML=signed.map(({item,path,url,error:signedError})=>{
+    const md=audioUserMetadata(item);
+    const systemMd=item.metadata||{};
+    const fallbackName=String(item.name||'').replace(/^\d+-[a-z0-9]+__/, '').replace(/-/g,' ');
+    const original=md.originalName||fallbackName||item.name;
+    const label=md.wfvLabel||original;
+    const author=md.uploadedBy||'Band member';
+    const version=versionByName.get(item.name)||'';
+    const size=formatBytes(systemMd.size||md.size);
+    const date=formatVersionDate(item.created_at||item.updated_at);
+    return `<article class="audio-version-item">
+      <div class="audio-version-top"><div class="audio-version-title"><span class="tag">VERSION ${version}</span><div><strong>${escapeHtml(label)}</strong><span>${escapeHtml(author)} · ${escapeHtml(date)}${size?` · ${escapeHtml(size)}`:''}</span></div></div>${canDeleteAudioIdea(item)?`<button class="activity-delete" title="Delete audio version" data-action="delete-audio-idea" data-title="${escapeAttr(title)}" data-path="${escapeAttr(path)}">×</button>`:''}</div>
+      <div class="audio-original-name">${escapeHtml(original)}</div>
+      ${url?`<audio controls preload="metadata" src="${escapeAttr(url)}"></audio><a class="audio-open-link" href="${escapeAttr(url)}" target="_blank" rel="noopener">Open file ↗</a>`:`<div class="asset-status">${escapeHtml(signedError?.message||'Could not create a listening link.')}</div>`}
+    </article>`;
+  }).join('');
+}
+
 function displayValue(value,empty='Not set yet'){const v=String(value??'').trim();return v?escapeHtml(v):`<span class="empty-value">${empty}</span>`}
 function detailBlock(label,value,empty='Not set yet'){return `<div class="detail-block"><div class="detail-label">${label}</div><div class="detail-value">${displayValue(value,empty)}</div></div>`}
 window.openSong=function(title,editMode=false){
@@ -231,6 +390,7 @@ window.openSong=function(title,editMode=false){
     ${mainContent}
     <h3>Reference Demo</h3><audio id="referenceAudio" controls preload="metadata" src="${remoteReady?'':audioFile(title)}"></audio><div id="assetStatus" class="asset-status">${remoteReady?'Loading private reference files…':''}</div>
     <p><a id="lyricPdfLink" class="pill" href="${remoteReady?'#':lyricPdf(title)}" target="_blank" rel="noopener" style="text-decoration:none;display:inline-block">Open lyric PDF ↗</a></p>
+    <h3>Audio Ideas / Versions</h3>${audioIdeasMarkup(title)}
     <h3>Lyrics</h3><div class="lyrics">${escapeHtml(formatLyrics(lyrics[title]||'Lyrics loading…'))}</div>
     ${editMode?`<div class="bottom-save"><button class="pill secondary" data-action="cancel-edit" data-title="${escapeAttr(title)}">Cancel</button><button class="pill primary" data-action="save-song" data-title="${escapeAttr(title)}">Save Changes</button></div>`:''}
   </div>
@@ -247,7 +407,7 @@ window.openSong=function(title,editMode=false){
   </div>
 </div>`;
   setView('songDetail');
-  if(remoteReady) loadPrivateAssets(title);
+  if(remoteReady){ loadPrivateAssets(title); loadAudioIdeas(title); }
 }
 function escapeHtml(s){return String(s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
 function escapeAttr(s){return escapeHtml(String(s)).replace(/`/g,'&#96;')}
@@ -259,6 +419,7 @@ function handleActionClick(event){
   const title=btn.dataset.title;
   const stage=btn.dataset.stage;
   const id=btn.dataset.id;
+  const path=btn.dataset.path;
   if(action==='open-song') return openSong(title,false);
   if(action==='edit-song') return openSong(title,true);
   if(action==='cancel-edit') return openSong(title,false);
@@ -267,6 +428,9 @@ function handleActionClick(event){
   if(action==='toggle-preprod') return togglePreprodStage(title,stage);
   if(action==='add-activity') return addActivity(title);
   if(action==='delete-activity') return deleteActivity(title,id);
+  if(action==='upload-audio-idea') return uploadAudioIdea(title);
+  if(action==='refresh-audio-ideas') return loadAudioIdeas(title);
+  if(action==='delete-audio-idea') return deleteAudioIdea(title,path);
   if(action==='back-songs') return setView('songs');
   if(action==='google-login') return googleLogin();
   if(action==='sign-out') return signOut();
