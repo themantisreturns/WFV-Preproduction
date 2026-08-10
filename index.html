@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#101010" />
+  <title>WFV Preproduction</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="authGate" class="auth-gate" hidden></div>
+  <div class="shell">
+    <header class="topbar">
+      <div>
+        <div class="eyebrow">WALTZ FOR VENUS</div>
+        <h1>Preproduction</h1>
+      </div>
+      <div class="top-actions"><div id="authArea"></div><button id="menuBtn" class="ghost mobile-only">Menu</button></div>
+    </header>
+
+    <nav id="nav" class="nav">
+      <button data-view="dashboard" class="active">Dashboard</button>
+      <button data-view="songs">Songs</button>
+      <button data-view="schedule">Schedule</button>
+      <button data-view="recording">Recording Plan</button>
+    </nav>
+
+    <div id="setupNotice" class="setup-notice" hidden><strong>Local preview mode.</strong> Google sign-in/shared syncing are ready in the code, but Supabase still needs your project URL/key and approved band emails. See <code>SETUP.md</code>.</div>
+
+    <main>
+      <section id="dashboard" class="view active"></section>
+      <section id="songs" class="view"></section>
+      <section id="schedule" class="view"></section>
+      <section id="recording" class="view"></section>
+      <section id="songDetail" class="view"></section>
+    </main>
+  </div>
+  <script src="config.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="app.js"></script>
+</body>
+</html>

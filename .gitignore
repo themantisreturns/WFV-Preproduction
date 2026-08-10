@@ -1,0 +1,7 @@
+# Unreleased Waltz for Venus material — never commit to public GitHub
+assets/audio/
+assets/lyrics/
+
+# OS/editor noise
+.DS_Store
+*.swp
