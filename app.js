@@ -316,9 +316,20 @@ async function bootstrap(){
   supabaseClient=window.supabase.createClient(c.SUPABASE_URL,c.SUPABASE_PUBLISHABLE_KEY,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true}});
   const {data:{session}}=await supabaseClient.auth.getSession();
   if(session) await activateSession(session); else showLogin();
-  supabaseClient.auth.onAuthStateChange(async (event,session)=>{
-    if(event==='SIGNED_OUT' || !session){ currentSession=null; currentMember=null; remoteReady=false; showLogin(); return; }
-    if(event==='SIGNED_IN' || event==='TOKEN_REFRESHED') await activateSession(session);
+  // Important: do not call other Supabase APIs directly inside onAuthStateChange.
+  // supabase-js can deadlock when an async database/auth request is awaited in this callback.
+  supabaseClient.auth.onAuthStateChange((event,session)=>{
+    if(event==='SIGNED_OUT' || !session){
+      currentSession=null; currentMember=null; remoteReady=false; showLogin(); return;
+    }
+    if(event==='SIGNED_IN' || event==='TOKEN_REFRESHED' || event==='INITIAL_SESSION'){
+      setTimeout(()=>{
+        activateSession(session).catch(err=>{
+          console.error('WFV session activation failed',err);
+          showLogin('Google sign-in succeeded, but the workspace could not finish loading. Reload and try again.');
+        });
+      },0);
+    }
   });
 }
 function showLogin(message=''){
@@ -337,9 +348,14 @@ async function activateSession(session){
   currentSession=session;
   const email=session.user?.email||'';
   const {data:member,error}=await supabaseClient.from('band_members').select('email,display_name,role').eq('email',email.toLowerCase()).maybeSingle();
-  if(error || !member){
+  if(error){
+    console.error('WFV band member lookup failed',error);
+    showLogin('Google sign-in worked, but the band access list could not be checked. Please reload; if this continues, check the band_members table and RLS setup in Supabase.');
+    return;
+  }
+  if(!member){
     await supabaseClient.auth.signOut();
-    showLogin('That Google account is not on the Waltz for Venus access list.');
+    showLogin(`The Google account ${email || 'you used'} is not on the Waltz for Venus access list.`);
     return;
   }
   currentMember=member;
